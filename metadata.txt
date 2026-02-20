@@ -1,0 +1,137 @@
+transaction_id
+
+Definition: A unique numerical identifier for every single transaction.
+
+Relevance: Used solely for tracking, logging, and deduplication. It has no predictive value itself.
+
+account_id
+
+Definition: A unique identifier for the user or customer account.
+
+Relevance: Critical for grouping data to build User Profiles. It allows the system to ask, "Is this behavior normal for this specific user?"
+
+device_id_hash
+
+Definition: An anonymized unique fingerprint of the physical device (phone, laptop, tablet).
+
+Relevance: Used to link separate accounts to the same physical hardware. If one device is associated with known fraud, it can be blacklisted.
+
+ip_address_hash
+
+Definition: An anonymized unique identifier for the internet connection.
+
+Relevance: Helps identify location and network clusters. High traffic from a single IP often indicates a botnet or proxy service.
+
+timestamp
+
+Definition: The exact date and time the transaction occurred.
+
+Relevance: The foundation for all velocity calculations (e.g., transactions per minute). It also helps detect time-based anomalies, such as a user transacting at 3 AM local time.
+
+amount
+
+Definition: The monetary value of the transaction.
+
+Relevance: Fraudsters often exhibit specific spending patterns, such as testing cards with tiny amounts or draining accounts with large amounts.
+
+currency
+
+Definition: The currency used (e.g., USD, GHS, EUR).
+
+Relevance: Sudden changes in currency or the use of foreign currencies can signal Account Takeover (ATO) or money laundering.
+
+channel
+
+Definition: The interface used to initiate the transaction (e.g., mobile, web, api).
+
+Relevance: Different channels have different risk profiles. For example, api channels are often targeted by automated bots, while mobile apps usually have stronger device binding.
+
+auth_method
+
+Definition: The security method used to verify the user (e.g., PIN, OTP, BIOMETRIC).
+
+Relevance: Weaker methods like PIN are easier to compromise than BIOMETRIC. A downgrade in auth method (e.g., forcing a fallback from FaceID to PIN) is a suspicious signal.
+
+geo_country
+
+Definition: The country where the transaction originated (based on IP).
+
+Relevance: Transactions from high-risk jurisdictions or countries the user has never visited are major red flags.
+
+tx_count_last_1h
+
+Definition: The count of transactions made by this account in the previous 60 minutes.
+
+Relevance: A classic signal for high-velocity attacks. Humans transact slowly; bots and scripts transact instantly.
+
+tx_count_last_5m
+
+Definition: The count of transactions made by this account in the previous 5 minutes.
+
+Relevance: Detects burst attacks or rapid-fire card testing (bin attacks) before a manual review can happen.
+
+tx_frequency_ratio
+
+Definition: The current transaction rate divided by a standard baseline (normalized).
+
+Relevance: Helps the model understand relative speed. A burst of activity is more suspicious for a user who usually transacts once a month than for a user who transacts daily.
+
+avg_tx_amount_7d
+
+Definition: The average transaction value for this account over the last 7 days.
+
+Relevance: Establishes a personal baseline for spending behavior.
+
+amount_to_avg_ratio
+
+Definition: The current transaction amount divided by the user's 7-day average.
+
+Relevance: A strong anomaly detector. If the ratio is 5.0, the user is spending 500% more than usual, which often indicates account draining.
+
+device_seen_before
+
+Definition: A flag (1 or 0) indicating if the user has successfully transacted with this device in the past.
+
+Relevance: Account Takeover (ATO) usually involves a device the legitimate owner has never used.
+
+new_device_flag
+
+Definition: The inverse of the above; 1 indicates this is the first time the account has used this device.
+
+Relevance: A primary risk indicator. While users do buy new phones, a new device combined with a high amount or location change is highly suspicious.
+
+accounts_per_device
+
+Definition: The number of unique accounts that have logged into this specific device ID.
+
+Relevance: The "smoking gun" for Device Farming. A legitimate phone usually accesses 1-2 accounts. A fraudster's phone might access 50+ stolen accounts.
+
+accounts_per_ip_24h
+
+Definition: The number of unique accounts that have transacted from this IP address in the last 24 hours.
+
+Relevance: Identifies IP Proxies or Botnets. If 100 different people appear to be transacting from the same residential IP, it is likely a proxy service used by attackers.
+
+typical_country
+
+Definition: The country where this user transacts most frequently (historical mode).
+
+Relevance: Establishes the user's "home base" for geographic comparisons.
+
+country_mismatch_flag
+
+Definition: A flag (1) indicating the current geo_country does not match the typical_country.
+
+Relevance: Signals potential Remote Access Trojans (RATs) or attackers logging in from a different part of the world.
+
+failed_login_count_last_1h
+
+Definition: The number of incorrect password attempts on this account in the last hour.
+
+Relevance: A strong indicator of Brute Force attacks or Credential Stuffing (bots trying lists of stolen passwords).
+
+failed_logins_then_success
+
+Definition: A flag indicating the user failed multiple login attempts before finally succeeding.
+
+Relevance: Often indicates that a hacker finally guessed the password or a bot eventually found a working credential in a dumped database.

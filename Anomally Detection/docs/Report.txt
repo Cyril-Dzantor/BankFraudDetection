@@ -1,0 +1,59 @@
+
+Bank Fraud Detection Model Performance Report
+=============================================
+
+This report summarizes the performance of the two anomaly detection models trained on the production fraud dataset:
+1.  **Isolation Forest**
+2.  **Lightweight Autoencoder**
+
+--------------------------------------------------------------------------------
+1. Isolation Forest Model
+--------------------------------------------------------------------------------
+
+| Metric            | Value       |
+| :---------------- | :---------- |
+| **Accuracy**      | 99.73%      |
+| **Precision**     | 96.57%      |
+| **Recall**        | 96.57%      |
+| **F1 Score**      | 96.57%      |
+
+### Detailed Evaluation
+*   **Confusion Matrix**:
+    *   **True Positives (Caught Fraud)**: 1,154
+    *   **False Positives (False Alarms)**: 41
+    *   **True Negatives (Correct Normal)**: 28,764
+    *   **False Negatives (Missed Fraud)**: 41
+
+*   **Anomaly Scores**:
+    *   **Mean Score**: 0.150
+    *   **Range**: -0.163 (Most Anomalous) to 0.229 (Most Normal)
+
+--------------------------------------------------------------------------------
+2. Lightweight Autoencoder Model
+--------------------------------------------------------------------------------
+
+| Metric            | Value       |
+| :---------------- | :---------- |
+| **Accuracy**      | 98.84%      |
+| **Precision**     | 78.92%      |
+| **Recall**        | 96.82%      |
+| **F1 Score**      | 86.96%      |
+
+### Detailed Evaluation
+*   **Confusion Matrix**:
+    *   **True Positives (Caught Fraud)**: 1,157
+    *   **False Positives (False Alarms)**: 309
+    *   **True Negatives (Correct Normal)**: 28,496
+    *   **False Negatives (Missed Fraud)**: 38
+
+*   **Configuration**:
+    *   **Reconstruction Error Threshold**: 0.310989
+    *   Transactions with error > 0.31 are flagged as fraud.
+
+--------------------------------------------------------------------------------
+3. Model Comparison
+--------------------------------------------------------------------------------
+*   **Detection Capability (Recall)**: Both models are excellent. The **Autoencoder** caught slightly more fraud cases (96.8% vs 96.6%), missing only 38 frauds compared to 41.
+*   **Reliability (Precision)**: The **Isolation Forest** is far more precise (96.6% vs 78.9%). It generated only 41 false alarms, whereas the Autoencoder generated 309.
+*   **Overall (F1 Score)**: The **Isolation Forest** is the balanced winner (0.97 vs 0.87).
+
