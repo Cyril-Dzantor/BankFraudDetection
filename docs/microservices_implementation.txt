@@ -1,0 +1,351 @@
+============================================================================================
+BANK FRAUD DETECTION — MICROSERVICES IMPLEMENTATION DOCUMENTATION
+============================================================================================
+Date        : 2026-02-24
+Author      : Cyril Dzantor
+Version     : 2.0.0
+Status      : Implementation Complete (pre-Docker E2E verification pending)
+============================================================================================
+
+
+1. OVERVIEW
+-----------
+The Bank Fraud Detection system was originally implemented as a single FastAPI monolith
+(app.py). This document describes the design decisions and implementation steps taken to
+decompose it into 8 independent FastAPI microservices.
+
+The monolith (app.py) is retained for reference but is marked DEPRECATED. All new
+development targets the microservices stack under services/.
+
+
+2. WHY MICROSERVICES?
+----------------------
+The key motivations for migrating were:
+
+  a) Independent scaling — the three ML model services (Isolation Forest, Autoencoder,
+     XGBoost) are computationally heavy and benefit from scaling independently of the
+     lightweight Rules Engine and Decision Engine.
+
+  b) Full ML parallelism — in the monolith, the three models were called sequentially.
+     The microservices architecture allows all three to run concurrently (asyncio.gather),
+     cutting inference latency significantly.
+
+  c) Clear separation of concerns — each layer of the fraud detection pipeline maps
+     1-to-1 to a dedicated service, making it easier to test, debug, and replace
+     individual components.
+
+  d) Future extensibility — the Action Layer and Post-Auth Intelligence stubs were
+     designed to be filled in independently without touching the inference pipeline.
+
+
+3. DIRECTORY STRUCTURE
+-----------------------
+BankFraudDetection/
+│
+├── services/                          ← New microservices root
+│   ├── shared/
+│   │   ├── __init__.py                ← Python package marker
+│   │   └── schemas.py                 ← All shared Pydantic models
+│   │
+│   ├── orchestrator/                  ← Port 8000 (public-facing gateway)
+│   │   ├── app.py
+│   │   ├── requirements.txt
+│   │   └── Dockerfile
+│   │
+│   ├── rules_engine/                  ← Port 8001
+│   │   ├── app.py
+│   │   ├── requirements.txt
+│   │   └── Dockerfile
+│   │
+│   ├── isolation_forest/              ← Port 8002
+│   │   ├── app.py
+│   │   ├── requirements.txt
+│   │   └── Dockerfile
+│   │
+│   ├── autoencoder/                   ← Port 8003
+│   │   ├── app.py
+│   │   ├── requirements.txt
+│   │   └── Dockerfile
+│   │
+│   ├── xgboost_classifier/            ← Port 8004
+│   │   ├── app.py
+│   │   ├── requirements.txt
+│   │   └── Dockerfile
+│   │
+│   ├── decision_engine/               ← Port 8005
+│   │   ├── app.py
+│   │   ├── requirements.txt
+│   │   └── Dockerfile
+│   │
+│   ├── action_layer/                  ← Port 8006 (stub)
+│   │   ├── app.py
+│   │   ├── requirements.txt
+│   │   └── Dockerfile
+│   │
+│   └── post_auth_intelligence/        ← Port 8007 (stub)
+│       ├── app.py
+│       ├── requirements.txt
+│       └── Dockerfile
+│
+├── docker-compose.yml                 ← Wires all 8 services
+└── app.py                             ← DEPRECATED monolith (kept for reference)
+
+
+4. SHARED SCHEMAS (services/shared/schemas.py)
+-----------------------------------------------
+All inter-service data contracts are defined as Pydantic v2 models in a single central
+file. This ensures that any change to a field name or type is immediately reflected
+across all services.
+
+  TransactionRequest  — the raw transaction payload (17+ fields, mirrors models.py)
+  RulesResult         — output from the Rules Engine service
+  IFScore             — Isolation Forest decision_function score
+  AEScore             — Autoencoder reconstruction error + anomaly flag + threshold
+  XGBScore            — XGBoost fraud probability + is_fraud boolean
+  DecideRequest       — input sent to the Decision Engine (ML scores + rules flag)
+  FraudVerdict        — the final verdict returned to the caller
+  ActionAck           — confirmation from the Action Layer
+  PostAuthPayload     — full event record sent to Post-Auth Intelligence
+
+Design decision: schemas are copied into each Docker image (COPY services/shared/).
+This avoids any inter-container import dependency at runtime.
+
+
+5. SERVICE DETAILS
+-------------------
+
+5.1  ORCHESTRATOR  (Port 8000)
+-------------------------------
+File: services/orchestrator/app.py
+
+This is the ONLY service exposed to the outside world. All clients submit transactions
+to POST /score and receive a FraudVerdict.
+
+Pipeline (async):
+  Step 1 — POST rules_engine:8001/evaluate
+           If rules_flag == "BLOCK": immediately return DECLINE verdict.
+           The ML layer is skipped entirely (early exit).
+
+  Step 2 — asyncio.gather(
+               POST isolation_forest:8002/score,
+               POST autoencoder:8003/score,
+               POST xgboost_classifier:8004/score
+           )
+           All three ML models run concurrently.
+
+  Step 3 — POST decision_engine:8005/decide
+           Combines ML scores + rules flag into a final FraudVerdict.
+
+  Step 4 — asyncio.create_task (fire-and-forget):
+               POST action_layer:8006/execute
+               POST post_auth_intelligence:8007/record
+           These are non-blocking — the client does not wait for them.
+
+  Step 5 — Return FraudVerdict to the client.
+
+Key design choices:
+  - Service URLs are injected via environment variables (default: http://service_name:port).
+    This allows integration tests to override URLs to point at localhost.
+  - httpx.AsyncClient is used for all downstream calls to avoid blocking the event loop.
+  - A 10-second timeout is applied to every downstream call.
+  - HTTP 502 is returned if a downstream service returns an error.
+  - HTTP 503 is returned if a downstream service is unreachable.
+
+
+5.2  RULES ENGINE  (Port 8001)
+--------------------------------
+File: services/rules_engine/app.py
+
+Wraps the existing RulesEngine class from Rules Engine/rules_engine.py with zero
+logic changes. The service uses sys.path injection to import the real rules engine
+without duplicating any code.
+
+Endpoint: POST /evaluate → RulesResult
+
+The Rules Engine applies 16 business rules across 5 categories:
+  - Velocity (burst/frequency)
+  - Amount (large amount, ratio spike, extreme ratio)
+  - Geo/Country (mismatch)
+  - Device (new device, farming, multi-account)
+  - IP (multi-account, botnet)
+  - Authentication (brute force, failed-then-success, weak auth on new device)
+
+Final flag is determined by:
+  a) Any BLOCK-severity rule fires → BLOCK
+  b) failed_rules / total_rules >= 40% threshold → BLOCK (escalation)
+  c) Any FLAG-severity rule fires → FLAG
+  d) All rules pass → ALLOW
+
+
+5.3  ISOLATION FOREST  (Port 8002)
+------------------------------------
+File: services/isolation_forest/app.py
+
+Loads isolation_forest_model.joblib at startup. Does NOT reload per-request.
+
+Feature vector: 13 features (same as training)
+  Numerical:    tx_count_last_5m, tx_count_last_1h, tx_frequency_ratio,
+                amount, avg_tx_amount_7d, amount_to_avg_ratio,
+                failed_login_count_last_1h, accounts_per_device, accounts_per_ip_24h
+  Categorical:  geo_country, currency, channel, auth_method
+  (Categoricals are ordinal-encoded using the same mapping as training)
+
+Endpoint: POST /score → IFScore
+  if_score: decision_function() value (lower/more negative = more anomalous)
+
+Model file is mounted read-only at runtime via docker-compose volume:
+  ./Anomally Detection/IsolationForest:/app/Anomally Detection/IsolationForest:ro
+
+
+5.4  AUTOENCODER  (Port 8003)
+-------------------------------
+File: services/autoencoder/app.py
+
+Loads 3 files at startup:
+  autoencoder_model.joblib   — the trained Keras/sklearn autoencoder
+  autoencoder_scaler.joblib  — the StandardScaler fit on training data
+  ae_threshold.txt           — the reconstruction error threshold
+
+Feature vector: same 13 unsupervised features as Isolation Forest.
+
+Endpoint: POST /score → AEScore
+  ae_error:     MSE between input and reconstruction (higher = more anomalous)
+  ae_threshold: the trained threshold value
+  ae_anomaly:   True if ae_error > ae_threshold
+
+All three model files are mounted read-only via docker-compose:
+  ./Anomally Detection/Lightweight Autoencoder:/app/Anomally Detection/Lightweight Autoencoder:ro
+
+
+5.5  XGBOOST CLASSIFIER  (Port 8004)
+--------------------------------------
+File: services/xgboost_classifier/app.py
+
+Loads xgboost_model.joblib at startup.
+
+IMPORTANT: The XGBoost model was trained on 17 RAW TRANSACTION FEATURES ONLY.
+An earlier version of the monolith incorrectly appended anomaly scores from
+Isolation Forest and Autoencoder (making a 19-feature vector), which caused
+UserWarning suppressions in app.py. This service uses the correct 17-feature
+vector, matching train_xgboost.py exactly.
+
+Feature vector: 17 features
+  Adds to the 13 unsupervised features:
+    new_device_flag, device_seen_before, country_mismatch_flag,
+    failed_logins_then_success
+
+Endpoint: POST /score → XGBScore
+  fraud_score: predict_proba()[:,1] — fraud probability (0.0–1.0)
+  is_fraud:    True if fraud_score >= 0.5
+
+Model file is mounted read-only via docker-compose:
+  ./Anomally Detection/XGBoost Classifier:/app/Anomally Detection/XGBoost Classifier:ro
+
+
+5.6  DECISION ENGINE  (Port 8005)
+-----------------------------------
+File: services/decision_engine/app.py
+
+Wraps the existing make_decision() function from Decision Layer/decision_engine.py
+with zero logic changes. Uses sys.path injection to access decision_config.json.
+
+Endpoint: POST /decide → FraudVerdict
+
+Inputs:
+  fraud_score     — from XGBoost
+  if_score        — from Isolation Forest
+  ae_error        — from Autoencoder
+  rules_flag      — "ALLOW" or "FLAG" (BLOCK is handled as early exit by Orchestrator)
+  triggered_rules — list of rule names that fired
+
+Decision thresholds are read from Decision Layer/decision_config.json:
+  fraud_score   >= decline_threshold  → DECLINE
+  fraud_score   >= challenge_threshold → CHALLENGE
+  else                                → APPROVE
+
+
+5.7  ACTION LAYER  (Port 8006)  [STUB]
+----------------------------------------
+File: services/action_layer/app.py
+
+Current stub behaviour: logs the FraudVerdict and returns ActionAck(action_taken="LOGGED").
+
+Planned real actions (from action_list.txt):
+  DECLINE   → block card / freeze account                        (item 4.1)
+  CHALLENGE → trigger OTP / step-up authentication               (item 4.2)
+  APPROVE   → no action required                                 (item 4.3)
+
+These will be implemented once downstream integrations (card management system,
+SMS/OTP gateway) are ready.
+
+
+5.8  POST-AUTH INTELLIGENCE  (Port 8007)  [STUB]
+--------------------------------------------------
+File: services/post_auth_intelligence/app.py
+
+Current stub behaviour: appends each scored event as a JSON line to
+services/post_auth_intelligence/retraining_data.jsonl.
+
+Each record contains:
+  timestamp, decision, is_early_exit, fraud_score, full transaction dict
+
+Planned full features (action_list.txt items 5.1–5.4):
+  5.1 Model drift detection
+  5.2 Automated retraining triggers
+  5.3 Fraud pattern analysis
+  5.4 False-positive feedback loop
+
+
+6. DOCKER COMPOSE (docker-compose.yml)
+----------------------------------------
+All 8 services are defined in a single docker-compose.yml at the project root.
+
+Key design choices:
+
+  a) Build context = project root (.)
+     Each Dockerfile is referenced via dockerfile: services/<name>/Dockerfile.
+     This allows Dockerfiles to COPY files from anywhere in the project.
+
+  b) Model files are NOT baked into images.
+     They are mounted read-only at runtime. This means:
+     - Retraining and updating a model does not require rebuilding the image.
+     - Images stay lean (no large binary blobs).
+
+  c) Shared network: fraud_net (bridge)
+     All services communicate using Docker service names (e.g., http://rules_engine:8001).
+
+  d) Health checks on /health endpoints
+     Every service exposes GET /health returning {"status": "ok"}.
+     The Orchestrator uses depends_on: condition: service_healthy to ensure it only
+     starts after all 7 downstream services have passed their health checks.
+
+  e) Environment variables for service URLs
+     The Orchestrator reads all downstream URLs from environment variables with
+     sensible defaults. This allows integration tests to override URLs without
+     rebuilding images.
+
+  To start the full stack:
+      docker compose up --build
+
+  Public API:
+      http://localhost:8000/docs   (Swagger UI)
+      POST http://localhost:8000/score
+
+
+
+
+7. REMAINING WORK
+------------------
+  - docker compose up --build — integration test of the full Docker stack
+  - Write services/tests/test_e2e.py covering:
+      * Legitimate transaction → APPROVE
+      * High-risk transaction  → DECLINE or CHALLENGE
+      * BLOCK rule triggered   → DECLINE (early exit, ML skipped)
+  - Verify Swagger UI at http://localhost:8000/docs
+  - Implement Action Layer real integrations (action_list.txt items 4.1–4.3)
+  - Implement Post-Auth Intelligence full features (items 5.1–5.4)
+
+
+============================================================================================
+END OF DOCUMENT
+============================================================================================

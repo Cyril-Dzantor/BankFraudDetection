@@ -1,0 +1,43 @@
+{
+    "_description": "Decision Engine threshold configuration. Edit these values to tune behaviour without changing code.",
+    "thresholds": {
+        "decline_above": 0.80,
+        "challenge_above": 0.50,
+        "approve_below": 0.50
+    },
+    "anomaly_signals": {
+        "_description": "Thresholds for Isolation Forest and Autoencoder signals fed to the Decision Layer.",
+        "if_anomaly_threshold": 0.0,
+        "_if_note": "Isolation Forest: scores BELOW this value are considered anomalous. IF decision_function returns lower values for anomalies.",
+        "ae_reconstruction_threshold": 0.31,
+        "_ae_note": "Autoencoder: reconstruction MSE ABOVE this value is considered anomalous. Tune based on the ae_threshold.txt from training.",
+        "boost_to_decline_when_both_flag": true,
+        "_boost_note": "If both IF and AE flag a transaction AND fraud_score >= challenge_above, escalate directly to DECLINE instead of CHALLENGE."
+    },
+    "rules_engine": {
+        "_description": "How the Rules Engine feeds into the Decision Layer.",
+        "flag_states": {
+            "ALLOW": "All rules passed. Transaction forwarded to ML layer then Decision Engine.",
+            "FLAG": "One or more individual rules failed. Transaction still forwarded to ML layer. Decision Engine applies combined logic.",
+            "BLOCK": "Transaction failed >= the block_threshold_pct percentage of rules. EARLY EXIT — ML layer is skipped. Decision is DECLINE immediately."
+        },
+        "block_threshold_pct": 0.40,
+        "_block_threshold_note": "If a transaction fails 40% or more of all evaluated rules, it is BLOCKed and the pipeline exits early."
+    },
+    "rules_overrides": {
+        "BLOCK_forces_early_exit_decline": true,
+        "FLAG_escalates_to_challenge": true
+    },
+    "confidence_bands": {
+        "high_certainty_min": 0.85,
+        "high_certainty_max": 0.15,
+        "medium_certainty_min": 0.65,
+        "medium_certainty_max": 0.35
+    },
+    "decisions": {
+        "APPROVE": "Transaction appears legitimate. Allow to proceed.",
+        "CHALLENGE": "Transaction is suspicious. Trigger additional verification (OTP/MFA).",
+        "DECLINE": "Transaction declined.",
+        "DECLINE_EARLY_EXIT": "Transaction failed a critical number of rules. Declined without ML scoring."
+    }
+}

@@ -19,14 +19,11 @@ FEATURE_IMPORTANCE_PATH = os.path.join(BASE_DIR, 'xgboost_feature_importance.png
 CM_PLOT_PATH = os.path.join(BASE_DIR, 'xgboost_confusion_matrix.png')
 TEST_SET_XGB_PATH = os.path.join(BASE_DIR, '..', 'data', 'test_set_xgb.csv')
 
-# Unsupervised Model Paths (Inputs)
-IF_MODEL_PATH = os.path.join(BASE_DIR, '..', 'IsolationForest', 'isolation_forest_model.joblib')
-AE_MODEL_PATH = os.path.join(BASE_DIR, '..', 'Lightweight Autoencoder', 'autoencoder_model.joblib')
-AE_SCALER_PATH = os.path.join(BASE_DIR, '..', 'Lightweight Autoencoder', 'autoencoder_scaler.joblib')
-
 def load_and_preprocess_data(filepath):
     """
-    Loads data, generates anomaly scores from IF/AE, and preprocesses for XGBoost.
+    Loads data and preprocesses for standalone XGBoost training.
+    XGBoost trains on raw transaction features only.
+    Anomaly scores (IF + AE) are NOT included here — they go to the Decision Layer.
     """
     print(f"Loading data from {filepath}...")
     if not os.path.exists(filepath):
@@ -35,18 +32,8 @@ def load_and_preprocess_data(filepath):
     df = pd.read_csv(filepath)
     print(f"Dataset Shape: {df.shape}")
 
-    # 1. Define Feature Sets
-    # Features used by Isolation Forest and Autoencoder (Must match their training!)
-    unsupervised_features = [
-        'tx_count_last_5m', 'tx_count_last_1h', 'tx_frequency_ratio', 
-        'amount', 'avg_tx_amount_7d', 'amount_to_avg_ratio', 
-        'failed_login_count_last_1h', 'accounts_per_device', 
-        'accounts_per_ip_24h',
-        'geo_country', 'currency', 'channel', 'auth_method'
-    ]
-    
-    # Full Feature Set for XGBoost (User Requested)
-    xgboost_features = [
+    # Feature Set for XGBoost (raw transaction features only)
+    features_to_keep = [
         'tx_count_last_5m', 'tx_count_last_1h', 'tx_frequency_ratio',
         'amount', 'avg_tx_amount_7d', 'amount_to_avg_ratio',
         'new_device_flag', 'device_seen_before', 'country_mismatch_flag',
@@ -54,71 +41,22 @@ def load_and_preprocess_data(filepath):
         'failed_login_count_last_1h', 'failed_logins_then_success',
         'channel', 'auth_method', 'geo_country', 'currency'
     ]
-    
-    # 2. Preprocess for Unsupervised Models (Encoding)
-    # We need a temporary dataframe encoded exactly as IF/AE expect
-    df_unsup = df[unsupervised_features].copy()
+
+    available_features = [f for f in features_to_keep if f in df.columns]
+    print(f"Selected Features ({len(available_features)}): {available_features}")
+
+    df_clean = df[available_features + ['is_fraud']].copy()
+
+    # Encode Categorical Columns
     cat_cols = ['geo_country', 'currency', 'channel', 'auth_method']
     for col in cat_cols:
-        if col in df_unsup.columns:
-            df_unsup[col] = df_unsup[col].fillna('Unknown').astype(str)
+        if col in df_clean.columns:
+            df_clean[col] = df_clean[col].fillna('Unknown').astype(str)
             le = LabelEncoder()
-            df_unsup[col] = le.fit_transform(df_unsup[col])
-    df_unsup = df_unsup.fillna(0)
+            df_clean[col] = le.fit_transform(df_clean[col])
 
-    # 3. Generate Anomaly Scores
-    print("Generating Anomaly Scores from Unsupervised Models...")
-    
-    # Isolation Forest Score
-    if os.path.exists(IF_MODEL_PATH):
-        print("Loading Isolation Forest...")
-        if_model = joblib.load(IF_MODEL_PATH)
-        # decision_function: lower = more anomalous (negative)
-        # We might want to invert it so higher = anomaly, but XGBoost can handle it.
-        # Let's keep it raw.
-        df['isolation_forest_score'] = if_model.decision_function(df_unsup)
-    else:
-        print("Warning: Isolation Forest model not found. Filling with 0.")
-        df['isolation_forest_score'] = 0
-
-    # Autoencoder Reconstruction Error
-    if os.path.exists(AE_MODEL_PATH) and os.path.exists(AE_SCALER_PATH):
-        print("Loading Autoencoder...")
-        ae_model = joblib.load(AE_MODEL_PATH)
-        ae_scaler = joblib.load(AE_SCALER_PATH)
-        
-        # Scale data
-        X_scaled = ae_scaler.transform(df_unsup)
-        # Reconstruct
-        reconstructions = ae_model.predict(X_scaled)
-        # MSE Error
-        mse = np.mean(np.power(X_scaled - reconstructions, 2), axis=1)
-        df['autoencoder_reconstruction_error'] = mse
-    else:
-        print("Warning: Autoencoder model/scaler not found. Filling with 0.")
-        df['autoencoder_reconstruction_error'] = 0
-
-    # 4. Prepare Final XGBoost Dataset
-    # Add anomaly scores to feature list
-    final_features = xgboost_features + ['isolation_forest_score', 'autoencoder_reconstruction_error']
-    
-    print(f"Final Feature List for XGBoost ({len(final_features)} features):")
-    print(final_features)
-    
-    df_final = df[final_features + ['is_fraud']].copy()
-    
-    # Encode Categoricals for XGBoost
-    # Note: We re-encode here because the main df wasn't encoded yet
-    for col in cat_cols:
-        if col in df_final.columns:
-            df_final[col] = df_final[col].fillna('Unknown').astype(str)
-            le = LabelEncoder()
-            df_final[col] = le.fit_transform(df_final[col])
-            
-    # Handle Missing
-    df_final = df_final.fillna(0)
-    
-    return df_final
+    df_clean = df_clean.fillna(0)
+    return df_clean
 
 def train_xgboost(df):
     """

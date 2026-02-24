@@ -1,0 +1,194 @@
+version: "3.9"
+
+# ============================================================
+# Bank Fraud Detection — Microservices Stack
+# Run: docker compose up --build
+# Orchestrator public API: http://localhost:8000/docs
+# ============================================================
+
+networks:
+  fraud_net:
+    driver: bridge
+
+# Shared volume definitions for model files
+volumes:
+  anomaly_models:
+
+services:
+
+  # ────────────────────────────────────────────────────────────
+  # 1. Rules Engine — Port 8001
+  # ────────────────────────────────────────────────────────────
+  rules_engine:
+    build:
+      context: .
+      dockerfile: services/rules_engine/Dockerfile
+    ports:
+      - "8001:8001"
+    networks:
+      - fraud_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ────────────────────────────────────────────────────────────
+  # 2. Isolation Forest — Port 8002
+  # ────────────────────────────────────────────────────────────
+  isolation_forest:
+    build:
+      context: .
+      dockerfile: services/isolation_forest/Dockerfile
+    ports:
+      - "8002:8002"
+    networks:
+      - fraud_net
+    volumes:
+      # Mount model file read-only — no need to bake it into the image
+      - ./Anomally Detection/IsolationForest:/app/Anomally Detection/IsolationForest:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ────────────────────────────────────────────────────────────
+  # 3. Autoencoder — Port 8003
+  # ────────────────────────────────────────────────────────────
+  autoencoder:
+    build:
+      context: .
+      dockerfile: services/autoencoder/Dockerfile
+    ports:
+      - "8003:8003"
+    networks:
+      - fraud_net
+    volumes:
+      - ./Anomally Detection/Lightweight Autoencoder:/app/Anomally Detection/Lightweight Autoencoder:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ────────────────────────────────────────────────────────────
+  # 4. XGBoost Classifier — Port 8004
+  # ────────────────────────────────────────────────────────────
+  xgboost_classifier:
+    build:
+      context: .
+      dockerfile: services/xgboost_classifier/Dockerfile
+    ports:
+      - "8004:8004"
+    networks:
+      - fraud_net
+    volumes:
+      - ./Anomally Detection/XGBoost Classifier:/app/Anomally Detection/XGBoost Classifier:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ────────────────────────────────────────────────────────────
+  # 5. Decision Engine — Port 8005
+  # ────────────────────────────────────────────────────────────
+  decision_engine:
+    build:
+      context: .
+      dockerfile: services/decision_engine/Dockerfile
+    ports:
+      - "8005:8005"
+    networks:
+      - fraud_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ────────────────────────────────────────────────────────────
+  # 6. Action Layer — Port 8006
+  # ────────────────────────────────────────────────────────────
+  action_layer:
+    build:
+      context: .
+      dockerfile: services/action_layer/Dockerfile
+    ports:
+      - "8006:8006"
+    networks:
+      - fraud_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8006/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ────────────────────────────────────────────────────────────
+  # 7. Post-Auth Intelligence — Port 8007
+  # ────────────────────────────────────────────────────────────
+  post_auth_intelligence:
+    build:
+      context: .
+      dockerfile: services/post_auth_intelligence/Dockerfile
+    ports:
+      - "8007:8007"
+    networks:
+      - fraud_net
+    volumes:
+      # Persist the retraining data file outside the container
+      - ./services/post_auth_intelligence:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8007/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ────────────────────────────────────────────────────────────
+  # 8. Orchestrator — Port 8000  (public-facing)
+  # ────────────────────────────────────────────────────────────
+  orchestrator:
+    build:
+      context: .
+      dockerfile: services/orchestrator/Dockerfile
+    ports:
+      - "8000:8000"
+    networks:
+      - fraud_net
+    environment:
+      - RULES_ENGINE_URL=http://rules_engine:8001
+      - ISOLATION_FOREST_URL=http://isolation_forest:8002
+      - AUTOENCODER_URL=http://autoencoder:8003
+      - XGBOOST_URL=http://xgboost_classifier:8004
+      - DECISION_ENGINE_URL=http://decision_engine:8005
+      - ACTION_LAYER_URL=http://action_layer:8006
+      - POST_AUTH_INTELLIGENCE_URL=http://post_auth_intelligence:8007
+    depends_on:
+      rules_engine:
+        condition: service_healthy
+      isolation_forest:
+        condition: service_healthy
+      autoencoder:
+        condition: service_healthy
+      xgboost_classifier:
+        condition: service_healthy
+      decision_engine:
+        condition: service_healthy
+      action_layer:
+        condition: service_healthy
+      post_auth_intelligence:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

@@ -32,20 +32,36 @@ ENV/
 *.pt
 *.pth
 *.json.gz
+Anomally Detection/Models/
 
 # =============================================
-# Large Data Files (committed separately or via DVC)
+# Large Data Files (NOT committed - use DVC or Azure Blob)
 # =============================================
 *.csv
 *.parquet
 *.xlsx
-*.json
+Anomally Detection/data/
+
+# =============================================
+# Config / Secret Files (never push credentials)
+# =============================================
+.env
+.env.*
+*.env
+secrets.json
+config.secret.*
+credentials.json
 
 # =============================================
 # Logs & Reports
 # =============================================
 *.log
 logs/
+action_list.txt
+Report.txt
+rules_out.txt
+rules_test_output.txt
+*.txt.bak
 
 # =============================================
 # IDE / Editor

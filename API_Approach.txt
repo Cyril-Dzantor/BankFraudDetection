@@ -1,0 +1,388 @@
+================================================================================
+  BANK FRAUD DETECTION SYSTEM — API DEPLOYMENT APPROACH ANALYSIS
+  Prepared: 2026-02-24
+================================================================================
+
+
+OVERVIEW
+--------
+This document analyses two viable API deployment strategies for the Bank Fraud
+Detection system and provides a recommendation based on the current state of
+the project, its purpose, and the team's operational capacity.
+
+The two approaches are:
+
+  (A) Monolithic API        — all layers served behind a single FastAPI app
+  (B) Microservices API     — each layer/model exposed as its own independent API
+
+SYSTEM LAYERS (full architecture)
+----------------------------------
+The complete Bank Fraud Detection system consists of FIVE distinct layers:
+
+  Layer 1 — Rules Engine
+              Hard rule evaluation (velocity, geo, device, login anomalies).
+              Produces: ALLOW | FLAG | BLOCK
+
+  Layer 2 — ML Anomaly Detection (three models)
+              Isolation Forest    → isolation anomaly score (if_score)
+              Lightweight AE      → reconstruction error    (ae_error)
+              XGBoost Classifier  → fraud probability        (fraud_score)
+              Produces: three numerical signals
+
+  Layer 3 — Decision Engine
+              Combines Rules Engine flag + ML signals using configurable
+              thresholds to produce a final verdict.
+              Produces: APPROVE | CHALLENGE | DECLINE
+
+  Layer 4 — Action Layer          [planned]
+              Executes the verdict: triggers OTP, blocks card, logs alert, etc.
+
+  Layer 5 — Post-Auth Intelligence Layer   [YET TO BE BUILT]
+              Runs AFTER a transaction is resolved. Two responsibilities:
+                (a) User Account Profiling: continuously updates a per-user
+                    behavioural profile (typical spending, devices, locations,
+                    velocity patterns) to sharpen future fraud decisions.
+                (b) Retraining Data Generation: labels resolved transactions
+                    (confirmed fraud / confirmed legitimate) and publishes them
+                    to a retraining dataset, enabling periodic retraining of all
+                    three ML models (Isolation Forest, Autoencoder, XGBoost).
+
+  NOTE: The Post-Auth Intelligence Layer does NOT sit in the real-time scoring
+  path. It processes events asynchronously AFTER a transaction verdict is
+  issued, making it a background / event-driven component.
+
+================================================================================
+  METHOD A — MONOLITHIC API  (Current Implementation)
+================================================================================
+
+DESCRIPTION
+-----------
+A single FastAPI application (app.py) loads all three ML models into memory at
+startup and exposes one unified endpoint: POST /score. A single pipeline runs
+the transaction through Rules Engine → ML Layer → Decision Engine synchronously.
+
+Post-Auth Intelligence is not yet integrated. When built, it would run as a
+background task (FastAPI BackgroundTasks) triggered after each /score response
+is returned to the caller, keeping it off the critical latency path.
+
+CURRENT ENDPOINT MAP
+--------------------
+  GET  /health        — Liveness probe; returns {"status": "ok"}
+  POST /score         — Full end-to-end fraud scoring pipeline
+
+CURRENT PIPELINE FLOW
+---------------------
+  Client → POST /score
+                │
+                ├─ [placeholder] Rules Engine → rules_flag = "ALLOW"
+                │
+                ├─ predict.py (FraudScorer singleton)
+                │     ├─ Isolation Forest  → if_score
+                │     ├─ Autoencoder       → ae_error
+                │     └─ XGBoost           → fraud_score
+                │
+                └─ decision_engine.py (DecisionEngine singleton)
+                      └─ Threshold logic → { decision, confidence, reason, ... }
+
+FULL PIPELINE FLOW (when all layers are built — monolith)
+----------------------------------------------------------
+  Client → POST /score
+                │
+                ├─ Rules Engine      → rules_flag (ALLOW | FLAG | BLOCK)
+                │      [if BLOCK → early exit: DECLINE returned immediately]
+                │
+                ├─ predict.py        → if_score, ae_error, fraud_score
+                │
+                ├─ decision_engine   → { decision, confidence, reason, ... }
+                │
+                ├─ Action Layer      → executes verdict (OTP, block, alert)
+                │
+                └─ [response returned to client]
+                      │
+                      └─ BackgroundTask → Post-Auth Intelligence Layer
+                                   ├─ Update user behavioural profile
+                                   └─ Append labelled record to retraining dataset
+
+ADVANTAGES
+----------
+  1. Simple to develop: one codebase, one repo, one deployment unit.
+  2. Low latency: all layer calls are in-process — no network hops.
+  3. Easy to run locally: one `uvicorn app:app --reload` command.
+  4. Simple Azure deployment: one App Service or one Docker container.
+  5. Shared memory: all models occupy RAM once; no duplication across services.
+  6. Easier debugging: a single log stream covers the entire request lifecycle.
+  7. No service discovery or inter-service authentication needed.
+  8. Post-Auth Intelligence integrates naturally as a BackgroundTask in FastAPI,
+     running asynchronously after the response without a separate service.
+  9. Appropriate for the current scale and team size.
+
+DISADVANTAGES
+-------------
+  1. Scaling is all-or-nothing: XGBoost cannot be scaled independently of the
+     Autoencoder, even if XGBoost is the bottleneck.
+  2. A crash or memory error in one model can bring down the entire API.
+  3. Model updates require redeploying the entire application.
+  4. Individual model performance cannot be benchmarked in isolation in production.
+  5. All layers must use the same Python environment and dependency set.
+  6. As more layers are added (Rules Engine, Post-Auth Intelligence, Action
+     Layer), app.py risks becoming a large, hard-to-maintain entrypoint.
+  7. The Post-Auth Intelligence profiling workload (writes to a profile store,
+     appends to dataset) shares CPU/memory with the real-time scoring path.
+     Under high load, background tasks may starve the main request handler.
+
+DEPLOYMENT TARGET (Azure)
+-------------------------
+  - Azure App Service (Standard tier or above — needed for background tasks)
+  - OR: Azure Container Apps with a single container image
+  - Single Docker image: app.py + all model .joblib files
+  - Startup command: uvicorn app:app --host 0.0.0.0 --port 8000
+  - Retraining dataset: write to Azure Blob Storage or Azure SQL
+
+
+================================================================================
+  METHOD B — MICROSERVICES API  (Per-Layer Independent APIs)
+================================================================================
+
+DESCRIPTION
+-----------
+Each layer becomes its own independent FastAPI service, deployed separately and
+communicating over HTTP (or a message queue for async layers). An Orchestrator
+service receives the client request and coordinates the pipeline.
+
+The Post-Auth Intelligence Layer is a natural fit for a microservices
+architecture: it is an event-driven, asynchronous consumer that subscribes to
+transaction outcome events and processes them independently, with no impact on
+real-time scoring latency.
+
+PROPOSED SERVICE MAP
+--------------------
+  Port 8000 — Orchestrator / API Gateway         (app.py, public-facing)
+  Port 8001 — Rules Engine Service               (Rules Engine/)
+  Port 8002 — Isolation Forest Service           (Anomally Detection/IsolationForest/)
+  Port 8003 — Autoencoder Service                (Anomally Detection/Lightweight Autoencoder/)
+  Port 8004 — XGBoost Service                    (Anomally Detection/XGBoost Classifier/)
+  Port 8005 — Decision Engine Service            (Decision Layer/)
+  Port 8006 — Action Layer Service               (Action Layer/)
+  Port 8007 — Post-Auth Intelligence Service     (Post Auth Intelligence/)
+              [async — subscribes to event queue, not in the real-time path]
+
+FULL PIPELINE FLOW (microservices — real-time path)
+---------------------------------------------------
+  Client → POST /score (Orchestrator, port 8000)
+               │
+               ├─ POST /evaluate  → Rules Engine (8001)
+               │        └─ returns: { rules_flag: "ALLOW"|"FLAG"|"BLOCK" }
+               │
+               │  [if BLOCK → Orchestrator returns early exit DECLINE]
+               │
+               ├─ POST /score     → IF Service (8002)  ─┐
+               ├─ POST /score     → AE Service (8003)   ├─ all three run in parallel
+               ├─ POST /score     → XGBoost (8004)      ┘   each returns its own score
+               │        │                                   independently of the others
+               │        └─ { if_score, ae_error, fraud_score } → collected by Orchestrator
+               │
+               ├─ POST /decide    → Decision Engine (8005)
+               │        receives: rules_flag + if_score + ae_error + fraud_score
+               │        └─ returns: { decision, confidence, reason, ... }
+               │
+               ├─ POST /execute   → Action Layer (8006)
+               │        └─ triggers OTP / card block / fraud alert
+               │
+               └─ [response returned to client]
+
+POST-AUTH INTELLIGENCE (async path — NOT in real-time pipeline)
+---------------------------------------------------------------
+  Orchestrator publishes event → Azure Service Bus / Event Hub
+               │
+               └─ Post-Auth Intelligence Service (8007) [subscriber]
+                        ├─ Reads: transaction features + final verdict
+                        ├─ Updates: Azure Cosmos DB / Table Storage user profile
+                        └─ Appends: labelled record to Azure Blob retraining dataset
+                                    (consumed periodically by retraining pipeline)
+
+RETRAINING PIPELINE (offline — triggered on schedule or data threshold)
+-----------------------------------------------------------------------
+  Azure Blob retraining dataset
+               │
+               └─ Retraining Job (Azure ML / Container Job)
+                        ├─ Retrains Isolation Forest
+                        ├─ Retrains Autoencoder
+                        └─ Retrains XGBoost
+                                    │
+                                    └─ New .joblib files pushed to model registry
+                                       → IF, AE, XGBoost services hot-swap models
+
+ADVANTAGES
+----------
+  1. Independent scaling: XGBoost can have 10 replicas; Autoencoder can have 2.
+  2. Independent deployment: updating XGBoost only redeploys its service.
+  3. Technology flexibility: each service can use its own Python environment.
+  4. Fault isolation: a Post-Auth Intelligence crash does not affect scoring.
+  5. Post-Auth Intelligence is fully decoupled via an event queue — zero latency
+     impact on the real-time scoring path, even under heavy profiling workloads.
+  6. The retraining pipeline can be triggered independently of the scoring API.
+  7. Clear ownership: in a larger team, each service is owned by a separate squad.
+  8. Individual monitoring: latency, throughput, and errors measured per service.
+  9. Easier A/B testing: swap the XGBoost service with a new model version
+     while keeping all other services unchanged.
+
+DISADVANTAGES
+-------------
+  1. Significantly higher operational complexity: 7+ services to deploy and
+     maintain, plus an event queue and model registry.
+  2. Added real-time latency: each inter-service HTTP call adds ~1–5 ms. A
+     full pipeline (5 hops) adds 5–25 ms minimum.
+  3. Service discovery required: services must know each other's internal URLs.
+  4. Inter-service authentication: tokens or Azure Virtual Network access control
+     needed to prevent unauthorised internal calls.
+  5. Distributed debugging requires tracing tools (e.g., Azure Application
+     Insights distributed tracing) to correlate logs across services.
+  6. Higher Azure cost: each service requires its own Container App instance,
+     plus an Azure Service Bus or Event Hub for the async layer.
+  7. Managing model versioning across services (ensuring IF, AE, XGBoost are
+     trained on the same dataset version) requires a model registry strategy.
+  8. Not justified at current traffic volumes or team size.
+
+DEPLOYMENT TARGET (Azure)
+-------------------------
+  - Azure Container Apps Environment (all services on shared virtual network)
+  - Only Orchestrator (8000) has external/public ingress
+  - Internal services (8001–8007) use internal ingress only
+  - Azure Service Bus (Standard tier) for Post-Auth Intelligence event queue
+  - Azure Blob Storage for retraining dataset accumulation
+  - Azure ML or Azure Container Jobs for scheduled retraining pipeline
+  - Azure Container Registry for all Docker images
+
+
+================================================================================
+  METHOD A+ — ENHANCED MONOLITH  (Recommended Near-Term Approach)
+================================================================================
+
+DESCRIPTION
+-----------
+Keep everything in one FastAPI application but add dedicated endpoints for each
+layer, and implement the Post-Auth Intelligence Layer as an async background
+task. This gives per-layer visibility and enables the full pipeline without the
+operational overhead of microservices.
+
+PROPOSED ENDPOINT MAP
+---------------------
+  GET  /health                — Liveness probe
+  POST /score                 — Full end-to-end pipeline (existing endpoint)
+                                Triggers Post-Auth Intelligence as BackgroundTask
+  POST /ml/predict            — Runs all 3 ML models; returns raw scores only
+  POST /decision              — Accepts ml scores + rules_flag; returns verdict
+  POST /rules/evaluate        — (when Rules Engine is built) rules check only
+  POST /profile/{account_id}  — (Post-Auth Intelligence) returns user profile
+  GET  /profile/{account_id}  — Retrieve the current behavioural profile for
+                                an account (for inspection / debugging)
+
+HOW POST-AUTH INTELLIGENCE FITS IN METHOD A+
+---------------------------------------------
+After POST /score returns a verdict to the client, FastAPI fires a background
+task (non-blocking) that:
+
+  1. Reads the transaction features + final verdict from the completed request.
+  2. Updates the behavioural profile for that account_id (stored in a local
+     SQLite DB or Azure Table Storage, depending on environment).
+  3. Appends a labelled record (features + label: fraud/legitimate) to a CSV or
+     Azure Blob file that accumulates retraining data over time.
+
+The retraining dataset then feeds a separately scheduled retraining script
+(not part of the live API) that retrains the three ML models and replaces the
+.joblib files, after which uvicorn's --reload picks up the new models.
+
+
+================================================================================
+  RECOMMENDATION
+================================================================================
+
+RECOMMENDED APPROACH: METHOD A+ (Enhanced Monolith)
+
+Rationale
+---------
+The project is currently in an MVP / demonstration phase. Five of the six
+planned layers are fully or partially built; the Post-Auth Intelligence Layer
+is yet to be started. The team is small, the infrastructure is a single Azure
+deployment, and the operational overhead of maintaining 7+ independent services,
+an event queue, and a model registry is not justified at this stage.
+
+The monolithic architecture with structured endpoints and a background task for
+Post-Auth Intelligence is the correct choice now. It delivers the full
+end-to-end capability — including continuous profiling and retraining data
+generation — without introducing distributed systems complexity.
+
+Why the Post-Auth Intelligence Layer Matters for the Recommendation
+--------------------------------------------------------------------
+The Post-Auth Intelligence Layer is the component most likely to drive a future
+migration to microservices. Here is why:
+
+  - Profiling writes (updating user profiles after every transaction) can become
+    I/O heavy as the user base grows. In a monolith, this competes with the
+    real-time scoring path for CPU cycles.
+
+  - Retraining data accumulation and the retraining pipeline itself will
+    eventually need to run as a separate scheduled job. In the monolith, this
+    is a separate script; in microservices, it becomes a dedicated Container Job
+    or Azure ML pipeline triggered by the Post-Auth Intelligence service.
+
+  - If model retraining frequency increases (e.g., daily retraining as labelled
+    data accumulates), deploying new model weights without restarting the entire
+    monolith becomes desirable — a natural trigger for splitting the ML layer.
+
+For now, build the Post-Auth Intelligence Layer as a FastAPI BackgroundTask
+within the existing monolith. Design its internal interfaces (profiling store,
+retraining dataset writer) as clean, swappable abstractions so they can be
+migrated to a dedicated service later with minimal code changes.
+
+Migration Path (when to move to Method B)
+-----------------------------------------
+Consider splitting into microservices when ONE OR MORE of the following are true:
+
+  1. The Post-Auth Intelligence profiling workload starts degrading real-time
+     scoring latency under load (measurable with Azure Monitor metrics).
+
+  2. Retraining frequency increases to weekly or more, and deploying new model
+     weights requires zero-downtime rolling updates (not possible in a simple
+     monolith restart).
+
+  3. Request volume exceeds ~500 concurrent users and profiling shows a single
+     model layer is the bottleneck.
+
+  4. The team grows to multiple squads, each owning a different layer.
+
+  5. The Post-Auth Intelligence Layer requires a different data store or
+     environment (e.g., GPU for profile embedding models) incompatible with
+     the main scoring environment.
+
+  6. A compliance requirement demands strict network isolation between
+     real-time inference and post-transaction analytics.
+
+Immediate Action Items (priority order)
+----------------------------------------
+  [1] Build Post-Auth Intelligence Layer as a FastAPI BackgroundTask
+        - Design: profiling store interface + retraining dataset writer
+        - Storage: Azure Table Storage (profiles) + Azure Blob (retraining CSV)
+
+  [2] Add POST /ml/predict endpoint to app.py
+        - Returns raw IF / AE / XGBoost scores without running Decision Engine
+        - Enables independent model testing and dashboard integration
+
+  [3] Add POST /decision endpoint to app.py
+        - Accepts ML scores + rules_flag; returns verdict only
+        - Enables Decision Engine to be tested without triggering the ML pipeline
+
+  [4] Wire the Rules Engine into POST /score
+        - Replace the hardcoded rules_flag = "ALLOW" with actual Rules Engine call
+
+  [5] Add per-endpoint structured logging (JSON format)
+        - Captures: request id, account id, layer timings, final decision
+        - Feeds Azure Application Insights for observability
+
+  [6] Write a Dockerfile at the project root
+        - Documents the container build steps regardless of deployment target
+        - Enables one-command local container testing before any Azure deploy
+
+================================================================================
+  END OF DOCUMENT
+================================================================================
