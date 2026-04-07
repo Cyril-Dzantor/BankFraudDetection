@@ -1,0 +1,11 @@
+{
+    "account_number": "ACC-123456789",
+    "cif_id": "CIF-987654321",
+    "amount": 95.00,
+    "channel": "mobile",
+    "auth_method": "biometric",
+    "geo_country": "GH",
+    "currency": "GHS",
+    "device_id": "DEV-ABCDEF1234",
+    "ip_address": "192.168.1.100"
+}

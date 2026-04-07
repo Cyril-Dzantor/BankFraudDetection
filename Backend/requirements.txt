@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+sqlmodel
+pydantic-settings
+python-dotenv
+python-multipart
+jose[cryptography]
+passlib[bcrypt]
+httpx
+neo4j
+websockets
+pymysql

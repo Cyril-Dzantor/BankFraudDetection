@@ -1,0 +1,99 @@
+=============================================================
+BANK FRAUD DETECTION: LOCAL TO AZURE VM DEPLOYMENT GUIDE
+=============================================================
+
+This document outlines the step-by-step process for packaging the
+Bank Fraud Detection microservices stack on a Windows local machine
+and deploying it securely to an Azure Ubuntu Linux VM using Docker.
+
+-------------------------------------------------------------
+PHASE 1: PREPARE THE AZURE VM (Run once on the VM via SSH)
+-------------------------------------------------------------
+1. Update System Packages:
+   sudo apt-get update
+   sudo apt-get upgrade -y
+
+2. Install Docker Engine and Docker Compose V2:
+   curl -fsSL https://get.docker.com -o get-docker.sh
+   sudo sh get-docker.sh
+
+3. Allow execution without 'sudo' (Log out and log back in after):
+   sudo usermod -aG docker $USER
+   newgrp docker
+
+4. Verify Installation:
+   docker run hello-world
+   docker compose version
+
+5. Create the Project Directory:
+   mkdir ~/BankFraudDetection
+
+-------------------------------------------------------------
+PHASE 2: PACKAGE THE CODE (Run on Local Windows Machine)
+-------------------------------------------------------------
+Open PowerShell, navigate to the project root directory:
+cd "h:\Axxend Project\BankFraudDetection"
+
+Run the following command to create a compressed archive.
+CRITICAL: Do NOT exclude *.txt files, or Docker build will fail
+because it needs the requirements.txt files!
+
+# Optimized tar command to exclude all unnecessary data, caches, and node modules
+# This ensures the archive stays small and the VM build is clean.
+tar.exe -czvf vm_deployment.tar.gz `
+  --exclude="*.csv" `
+  --exclude="venv" `
+  --exclude=".git" `
+  --exclude="__pycache__" `
+  --exclude="*.log" `
+  --exclude=".next" `
+  --exclude="node_modules" `
+  --exclude="Anomally Detection/data" `
+  --exclude="vm_deployment.tar.gz" `
+  .
+
+-------------------------------------------------------------
+PHASE 3: TRANSFER THE ARCHIVE (Run on Local Windows Machine)
+-------------------------------------------------------------
+From the same PowerShell window, use SCP to securely copy the archive
+to the Azure VM home directory (replace Fraud_vm and IP accordingly):
+
+scp vm_deployment.tar.gz Fraud_vm@<your_vm_ip>:/home/Fraud_vm/
+
+-------------------------------------------------------------
+PHASE 4: EXTRACT AND RUN (Run on the Azure VM via SSH)
+-------------------------------------------------------------
+1. SSH into the Azure VM:
+   ssh Fraud_vm@<your_vm_ip>
+
+2. Move the archive into the project directory and extract:
+   cd ~/BankFraudDetection
+   mv ../vm_deployment.tar.gz .
+   
+   # This command safely overwrites old files with the new ones
+   tar -xzvf vm_deployment.tar.gz
+
+3. Build and Start the Docker Containers:
+   docker compose up --build -d
+
+4. Verify the containers are running:
+   docker ps
+
+    `docker compose up --build -d` will rebuild them cleanly.
+
+-------------------------------------------------------------
+PHASE 6: RUN SIMULATOR (Run on Local Windows Machine)
+-------------------------------------------------------------
+Once the VM stack is up and running, you can stream transactions 
+from your local machine to the VM's Orchestrator.
+
+1. Open a new PowerShell window in the project root.
+2. Set the target VM IP and run the simulator:
+
+   $env:ORCHESTRATOR_URL = "http://20.64.242.69:8000/score"
+   python scripts/stream_simulator.py
+
+3. Verification:
+   - Open the Dashboard at http://20.64.242.69:3000
+   - You should see the "Live" alert count increase as the simulator runs.
+   - (Optional) Check VM logs: `docker compose logs -f orchestrator`

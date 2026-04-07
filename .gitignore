@@ -91,3 +91,14 @@ build/
 .mypy_cache/
 htmlcov/
 .coverage
+
+# =============================================
+# Project Specific & Generated Artifacts
+# =============================================
+*.db
+bank_core.db
+vm_deployment.tar.gz
+sim_output.txt
+**/node_modules/
+**/venv/
+
